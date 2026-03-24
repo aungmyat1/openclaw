@@ -1014,7 +1014,9 @@ export async function startGatewayServer(
   }
 
   const stopModelPricingRefresh =
-    !minimalTestGateway && process.env.VITEST !== "1"
+    !minimalTestGateway &&
+    process.env.VITEST !== "1" &&
+    process.env.OPENCLAW_SKIP_MODEL_PRICING_REFRESH !== "1"
       ? startGatewayModelPricingRefresh({ config: cfgAtStart })
       : () => {};
 

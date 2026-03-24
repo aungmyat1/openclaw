@@ -1,0 +1,11 @@
+[Unit]
+Description=Run OpenClaw daily maintenance routine
+
+[Timer]
+OnBootSec=10min
+OnCalendar=daily
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

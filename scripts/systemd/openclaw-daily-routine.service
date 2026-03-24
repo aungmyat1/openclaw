@@ -1,0 +1,16 @@
+[Unit]
+Description=OpenClaw Daily Security, Health, and Performance Routine
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/openclaw-src/scripts/openclaw-daily-routine.sh
+Nice=10
+# Optional overrides:
+# Environment=OPENCLAW_DAILY_CPU_WARN_THRESHOLD=200
+# Environment=OPENCLAW_DAILY_MEM_WARN_THRESHOLD_MB=768
+# Environment=OPENCLAW_DAILY_HEALTH_WAIT_SECONDS=20
+
+[Install]
+WantedBy=default.target
