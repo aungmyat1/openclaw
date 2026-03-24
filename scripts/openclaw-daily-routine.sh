@@ -27,6 +27,10 @@ STATE_FILE="$LOG_DIR/daily-routine-state.env"
 SUMMARY_JSON="$LOG_DIR/daily-routine-latest.json"
 ALERT_FILE="$LOG_DIR/daily-routine-alert.txt"
 MAX_HEALTH_WAIT_SECONDS="${OPENCLAW_DAILY_HEALTH_WAIT_SECONDS:-20}"
+# How long curl may wait for /healthz (connect + response); retries help right after (re)starts.
+OPENCLAW_DAILY_HEALTH_CURL_MAX_SECONDS="${OPENCLAW_DAILY_HEALTH_CURL_MAX_SECONDS:-15}"
+OPENCLAW_DAILY_HEALTH_CURL_RETRIES="${OPENCLAW_DAILY_HEALTH_CURL_RETRIES:-3}"
+OPENCLAW_DAILY_PERMISSION_DOCKER_TIMEOUT="${OPENCLAW_DAILY_PERMISSION_DOCKER_TIMEOUT:-90s}"
 CPU_WARN_THRESHOLD="${OPENCLAW_DAILY_CPU_WARN_THRESHOLD:-200}"
 MEM_WARN_THRESHOLD_MB="${OPENCLAW_DAILY_MEM_WARN_THRESHOLD_MB:-768}"
 
@@ -92,12 +96,14 @@ fix_permissions() {
     return
   fi
   log "reapplying secure permissions to $CONFIG_DIR"
-  docker run --rm -v "$CONFIG_DIR:/mnt" alpine sh -lc '
+  if ! run_with_timeout "$OPENCLAW_DAILY_PERMISSION_DOCKER_TIMEOUT" docker run --rm -v "$CONFIG_DIR:/mnt" alpine sh -lc '
     chmod 700 /mnt
     if [ -f /mnt/openclaw.json ]; then
       chmod 600 /mnt/openclaw.json
     fi
-  ' >/dev/null
+  ' >/dev/null 2>&1; then
+    log "WARN: permission repair via alpine container failed or timed out (network/docker); continuing routine"
+  fi
 }
 
 ensure_gateway_running() {
@@ -132,11 +138,32 @@ wait_for_container() {
 }
 
 http_health_code() {
-  local body_file code
-  body_file="$(mktemp)"
-  code="$(curl -sS -o "$body_file" -w '%{http_code}' --max-time 5 "http://127.0.0.1:${GATEWAY_PORT}/healthz" || true)"
-  rm -f "$body_file"
-  printf '%s\n' "${code:-000}"
+  local body_file code attempt last_code=""
+  local max_time="$OPENCLAW_DAILY_HEALTH_CURL_MAX_SECONDS"
+  local retries="$OPENCLAW_DAILY_HEALTH_CURL_RETRIES"
+
+  for (( attempt = 1; attempt <= retries; attempt++ )); do
+    body_file="$(mktemp)"
+    code="$(
+      curl -sS -o "$body_file" -w '%{http_code}' \
+        --connect-timeout 5 \
+        --max-time "$max_time" \
+        "http://127.0.0.1:${GATEWAY_PORT}/healthz" 2>/dev/null || true
+    )"
+    rm -f "$body_file"
+    last_code="${code:-000}"
+    if [[ "$last_code" != "000" && -n "$last_code" ]]; then
+      printf '%s\n' "$last_code"
+      return
+    fi
+    if (( attempt < retries )); then
+      log "healthz check attempt ${attempt}/${retries} returned ${last_code:-000}; retrying in 2s"
+      sleep 2
+    fi
+  done
+
+  log "healthz check failed after ${retries} attempt(s); last code=${last_code:-000} port=${GATEWAY_PORT}"
+  printf '%s\n' "${last_code:-000}"
 }
 
 read_container_health() {
@@ -295,8 +322,14 @@ main() {
   fi
 
   audit_file="$(run_security_audit)"
-  critical_count="$(grep -E '^Summary:' "$audit_file" 2>/dev/null | sed -E 's/.*Summary: ([0-9]+) critical.*/\1/' | tail -n1)"
-  warn_count="$(grep -E '^Summary:' "$audit_file" 2>/dev/null | sed -E 's/.*critical · ([0-9]+) warn.*/\1/' | tail -n1)"
+  # grep exits 2 if audit_file is missing; with pipefail that would fail the whole routine.
+  if [[ -f "$audit_file" ]]; then
+    critical_count="$(grep -E '^Summary:' "$audit_file" 2>/dev/null | sed -E 's/.*Summary: ([0-9]+) critical.*/\1/' | tail -n1 || true)"
+    warn_count="$(grep -E '^Summary:' "$audit_file" 2>/dev/null | sed -E 's/.*critical · ([0-9]+) warn.*/\1/' | tail -n1 || true)"
+  else
+    critical_count="unknown"
+    warn_count="unknown"
+  fi
   critical_count="${critical_count:-unknown}"
   warn_count="${warn_count:-unknown}"
 
